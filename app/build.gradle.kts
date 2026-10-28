@@ -33,4 +33,5 @@ kotlin {
 dependencies {
     implementation("com.google.android.gms:play-services-nearby:19.5.1")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }
