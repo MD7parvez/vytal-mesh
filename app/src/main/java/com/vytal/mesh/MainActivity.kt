@@ -29,6 +29,7 @@ class MainActivity : Activity() {
     private lateinit var mapView: MapView
     private var x = 0.0; private var y = 0.0; private var floor = 0
     private var heading = 0.0; private var uncertainty = 2.0
+    private var baseLat = Double.NaN; private var baseLon = Double.NaN
     private var gpsManager: LocationManager? = null
     private val gpsSamples = mutableListOf<Location>()
     private var gpsListener: LocationListener? = null
@@ -69,8 +70,8 @@ class MainActivity : Activity() {
         statusView = label("MESH: STOPPED",14,Color.rgb(255,190,70)); peersView = label("CONNECTED UNITS: 0",14,Color.WHITE)
         right.addView(statusView); right.addView(peersView)
         right.addView(button("START / RESTART MESH") { startMesh() }, marginParams())
-        right.addView(button("SET OUTDOOR GPS BASE") { requestGpsBase() }, marginParams())
-        right.addView(button("MARK ENTRANCE / ZERO POSITION") { tracker?.setEntranceReference(); x=0.0; y=0.0; uncertainty=1.0; updatePosition("Entrance reference reset.") }, marginParams())
+        right.addView(button("SET GPS BASE AT ENTRANCE") { requestGpsBase() }, marginParams())
+        right.addView(button("MARK ENTRANCE / ZERO POSITION") { if(tracker==null) startTracking(); tracker?.setEntranceReference(); x=0.0; y=0.0; uncertainty=1.0; updatePosition("Entrance origin set. Keep this origin consistent across all units.") }, marginParams())
         right.addView(button("START INDOOR TRACKING") { startTracking() }, marginParams())
         right.addView(button("PAUSE TRACKING") { tracker?.stop(); tracker=null; appendLog("Sensor tracking paused") }, marginParams())
         right.addView(button("BEGIN 20 m STEP CALIBRATION") { tracker?.beginStepCalibration(); appendLog("Walk exactly 20 m, then press FINISH CALIBRATION.") }, marginParams())
@@ -93,7 +94,8 @@ class MainActivity : Activity() {
             { s -> runOnUiThread { statusView.text="MESH: $s" } },
             { m -> runOnUiThread { appendLog(m) } },
             { n -> runOnUiThread { peersView.text="CONNECTED UNITS: $n" } },
-            { unit,px,py,pf,pu -> runOnUiThread { team[unit]=TeamPosition(px,py,pf,pu); mapView.invalidate(); appendLog("Position received: $unit floor $pf") } })
+            { unit,px,py,pf,pu -> runOnUiThread { team[unit]=TeamPosition(px,py,pf,pu); mapView.invalidate(); appendLog("Position received: $unit floor $pf") } },
+            { lat,lon -> runOnUiThread { baseLat=lat; baseLon=lon; appendLog("Shared GPS anchor received: %.6f, %.6f".format(lat,lon)); updatePosition("Shared GPS anchor active.") } })
         mesh?.start()
     }
 
@@ -107,7 +109,7 @@ class MainActivity : Activity() {
                     if(location.hasAccuracy() && location.accuracy<=25f) gpsSamples.add(location)
                     statusView.text="GPS BASE: accurate fixes "+gpsSamples.size+"/5"
                     if(gpsSamples.size>=5) {
-                        val a=gpsSamples.take(5); val lat=a.map{it.latitude}.average(); val lon=a.map{it.longitude}.average()
+                        val a=gpsSamples.take(5); val lat=a.map{it.latitude}.average(); val lon=a.map{it.longitude}.average(); baseLat=lat; baseLon=lon; mesh?.sendBase(lat,lon)
                         gpsManager?.removeUpdates(this)
                         statusView.text="GPS BASE SET · mean accuracy %.1f m".format(a.map{it.accuracy}.average())
                         appendLog("GPS anchor saved: %.6f, %.6f".format(lat,lon))
