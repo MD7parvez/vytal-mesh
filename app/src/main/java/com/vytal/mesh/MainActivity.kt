@@ -128,11 +128,11 @@ class MainActivity : Activity() {
         tracker=IndoorTracker(this,{ px,py,pf,hdg,unc,steps -> runOnUiThread {
             x=px; y=py; floor=pf; heading=hdg; uncertainty=unc
             updatePosition("Steps $steps · heading %.0f° · uncertainty ±%.1f m".format(hdg,unc))
-            mesh?.sendPosition(x,y,floor,unc); mapView.invalidate()
+            mesh?.sendPosition(x,y,floor,unc,baseLat,baseLon); mapView.invalidate()
         }},{ e -> runOnUiThread { appendLog(e) } })
         tracker?.start()
     }
-    private fun updatePosition(detail:String) { positionView.text="LOCAL X %.1f m   Y %.1f m   FLOOR %d\n%s".format(x,y,floor,detail); mapView.invalidate() }
+    private fun updatePosition(detail:String) { val global=if(!baseLat.isNaN()&&!baseLon.isNaN()) "GPS %.6f, %.6f".format(baseLat+y/111111.0,baseLon+x/(111111.0*kotlin.math.cos(Math.toRadians(baseLat)).coerceAtLeast(0.01))) else "GPS anchor not set"; positionView.text="LOCAL E %.1f m   N %.1f m   FLOOR %d\\n%s\\n%s".format(x,y,floor,global,detail); mapView.invalidate() }
     private fun appendLog(s:String) { if(::logView.isInitialized) logView.append("\n"+s) }
     override fun onRequestPermissionsResult(r:Int,p:Array<out String>,g:IntArray) { super.onRequestPermissionsResult(r,p,g); if(r==101) { if(requiredPermissions.all{checkSelfPermission(it)==PackageManager.PERMISSION_GRANTED}) statusView.text="Permissions granted; start mesh or GPS base." else statusView.text="Location and nearby permissions required." } }
     override fun onDestroy() { tracker?.stop(); gpsListener?.let{gpsManager?.removeUpdates(it)}; mesh?.stop(); super.onDestroy() }
