@@ -194,8 +194,8 @@ class MainActivity : Activity() {
             if(trail.size>1){p.style=Paint.Style.STROKE;p.strokeWidth=4f;p.color=Color.rgb(0,245,180);val path=Path()
                 trail.forEachIndexed{i,pt->val q=project(pt,cx,cy,scale);if(i==0)path.moveTo(q.first,q.second)else path.lineTo(q.first,q.second)};c.drawPath(path,p);p.style=Paint.Style.FILL
                 trail.filterIndexed{i,_->i%max(1,trail.size/100)==0}.forEach{pt->val q=project(pt,cx,cy,scale);p.color=Color.rgb(0,229,255);c.drawCircle(q.first,q.second,3f,p)}}
-            val me=project(Point3(x,y,floor*3.2),cx,cy,scale);p.color=Color.rgb(255,55,110);c.drawCircle(me.first,me.second,9f,p);p.color=Color.WHITE;p.textSize=14f;c.drawText("YOU",me.first+12,me.second-8,p)
-            team.forEach{(name,t)->val q=project(Point3(t.x,t.y,t.floor*3.2),cx,cy,scale);p.color=Color.rgb(255,180,45);c.drawCircle(q.first,q.second,7f,p);p.color=Color.WHITE;p.textSize=11f;c.drawText(name.take(10),q.first+9,q.second-6,p)}
+            val me=project(Point3(x,y,floor.toDouble()*3.2),cx,cy,scale);p.color=Color.rgb(255,55,110);c.drawCircle(me.first,me.second,9f,p);p.color=Color.WHITE;p.textSize=14f;c.drawText("YOU",me.first+12,me.second-8,p)
+            team.forEach{(name,t)->val q=project(Point3(t.x,t.y,t.floor.toDouble()*3.2),cx,cy,scale);p.color=Color.rgb(255,180,45);c.drawCircle(q.first,q.second,7f,p);p.color=Color.WHITE;p.textSize=11f;c.drawText(name.take(10),q.first+9,q.second-6,p)}
             p.color=Color.rgb(0,229,255);p.textSize=13f;c.drawText("3D DEAD-RECKONED TRACK  •  FLOOR $floor  •  ±%.1f m".format(uncertainty),12f,h-14f,p)
             p.color=Color.LTGRAY;p.textSize=11f;c.drawText("Isometric view • vertical level is estimated from barometric pressure",12f,18f,p)
         }
