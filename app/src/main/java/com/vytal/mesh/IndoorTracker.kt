@@ -45,7 +45,7 @@ class IndoorTracker(context:Context,private val onUpdate:(Double,Double,Int,Doub
                 val h=(Math.toDegrees(o[0].toDouble())+360.0)%360.0
                 if(lastRotationHeading.isNaN())gyroYaw=h else {val delta=((h-lastRotationHeading+540.0)%360.0)-180.0;gyroYaw=(gyroYaw+delta+360.0)%360.0}
                 lastRotationHeading=h;heading=gyroYaw}
-            Sensor.TYPE_GYROSCOPE->{if(lastGyroNs!=0L){val dt=(e.timestamp-lastGyroNs)/1_000_000_000.0;gyroYaw=(gyroYaw+Math.toDegrees(e.values[2].toDouble()*dt)+360.0)%360.0;if(rotation==null)heading=gyroYaw};lastGyroNs=e.timestamp}
+            Sensor.TYPE_GYROSCOPE->{if(rotation==null){if(lastGyroNs!=0L){val dt=(e.timestamp-lastGyroNs)/1_000_000_000.0;gyroYaw=(gyroYaw+Math.toDegrees(e.values[2].toDouble()*dt)+360.0)%360.0;heading=gyroYaw};lastGyroNs=e.timestamp}}
             Sensor.TYPE_STEP_DETECTOR->{if(e.values.isNotEmpty()&&e.values[0]>0f)countStep(e.timestamp)}
             Sensor.TYPE_ACCELEROMETER->{val mag=kotlin.math.sqrt(e.values[0]*e.values[0]+e.values[1]*e.values[1]+e.values[2]*e.values[2]);val d=abs(mag-smoothed);smoothed=smoothed*.8f+mag*.2f
                 if(d>2.2f&&e.timestamp-lastPeak>380_000_000L){lastPeak=e.timestamp;countStep(e.timestamp)}}
