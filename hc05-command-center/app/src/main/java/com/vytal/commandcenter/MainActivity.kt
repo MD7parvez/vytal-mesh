@@ -140,6 +140,9 @@ class MainActivity : Activity() {
         disconnectButton = styledButton("DISCONNECT", Color.rgb(65, 78, 101)) { stopBluetooth() }
         sidebar.addView(connectButton, LinearLayout.LayoutParams(-1, dp(42)).apply { topMargin = dp(4) })
         sidebar.addView(disconnectButton, LinearLayout.LayoutParams(-1, dp(38)).apply { topMargin = dp(6) })
+        sidebar.addView(styledButton("GITHUB  ↗", Color.rgb(54, 75, 112)) {
+            startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://github.com/MD7parvez/vytal-mesh")))
+        }, LinearLayout.LayoutParams(-1, dp(38)).apply { topMargin = dp(6) })
         sidebar.addView(styledButton("GITHUB REPOSITORY", Color.rgb(55, 75, 112)) {
             startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/MD7parvez/vytal-mesh")))
         }, LinearLayout.LayoutParams(-1, dp(38)).apply { topMargin = dp(6) })
