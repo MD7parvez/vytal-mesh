@@ -39,6 +39,7 @@ class MainActivity : Activity() {
             status.text = "Bluetooth • $state"
             if (line.isNotBlank()) {
                 lastData.text = line
+                renderSensorLine(line)
                 raw.append("$line\n")
                 log.text = "Sensor data received from $role"
             }
@@ -97,6 +98,7 @@ class MainActivity : Activity() {
         roles.setOnCheckedChangeListener { group, checkedId ->
             val selected = group.findViewById<RadioButton>(checkedId)?.tag as? String ?: "FF1"
             if (selected != role) {
+                stopBluetooth()
                 role = selected
                 getSharedPreferences("vytal", MODE_PRIVATE).edit().putString("role", role).apply()
                 applyRole()
