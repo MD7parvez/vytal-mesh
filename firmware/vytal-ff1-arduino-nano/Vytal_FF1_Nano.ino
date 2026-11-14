@@ -1,13 +1,11 @@
 /*
  * Vytal FF1 — Arduino Nano + HC-05
  * Sensors: analog pulse sensor on A0, DHT11 on D2.
- * Buttons: SOS D3, HELP D4, GATHER D5 (button to GND).
  * HC-05: module TX -> Nano D10; module RX <- Nano D11 through a voltage divider.
  * HC-05 UART: 9600 baud.
  *
- * Output protocol:
- * DATA|FF1|bpm|temperatureC|humidityPercent
- * BUTTON|FF1|SOS / HELP / GATHER
+ * Output: DATA|FF1|bpm|temperatureC|humidityPercent
+ * No MCU buttons; SOS / HELP / GATHER are controlled from the firefighter phone app.
  *
  * Prototype telemetry only. Not a certified medical or firefighter safety device.
  */
@@ -17,28 +15,11 @@
 #define DHT_PIN 2
 #define DHT_TYPE DHT11
 #define PULSE_PIN A0
-#define BTN_SOS 3
-#define BTN_HELP 4
-#define BTN_GATHER 5
 #define BT_RX 10
 #define BT_TX 11
 
 SoftwareSerial hc05(BT_RX, BT_TX);
 DHT dht(DHT_PIN, DHT_TYPE);
-
-struct ButtonState {
-  uint8_t pin;
-  const char *name;
-  bool stable;
-  bool lastRaw;
-  unsigned long changedAt;
-};
-
-ButtonState buttons[] = {
-  {BTN_SOS, "SOS", HIGH, HIGH, 0},
-  {BTN_HELP, "HELP", HIGH, HIGH, 0},
-  {BTN_GATHER, "GATHER", HIGH, HIGH, 0}
-};
 
 float pulseBaseline = 512.0f;
 int bpm = 0;
@@ -54,12 +35,10 @@ void samplePulse() {
   const unsigned long now = millis();
   if (now - lastPulseSample < 10) return;
   lastPulseSample = now;
-
   const int sample = analogRead(PULSE_PIN);
   pulseBaseline += 0.01f * ((float)sample - pulseBaseline);
   const float amplitude = (float)sample - pulseBaseline;
   const float threshold = 28.0f;
-
   if (amplitude > threshold && !pulseHigh && (now - lastBeatAt) > 300) {
     pulseHigh = true;
     if (lastBeatAt != 0) {
@@ -73,25 +52,6 @@ void samplePulse() {
   }
   if (amplitude < threshold * 0.4f) pulseHigh = false;
   if (lastBeatAt == 0 || now - lastBeatAt > 2500) bpm = 0;
-}
-
-void updateButtons() {
-  const unsigned long now = millis();
-  for (unsigned int i = 0; i < sizeof(buttons) / sizeof(buttons[0]); i++) {
-    ButtonState &b = buttons[i];
-    const bool rawState = digitalRead(b.pin);
-    if (rawState != b.lastRaw) {
-      b.lastRaw = rawState;
-      b.changedAt = now;
-    }
-    if ((now - b.changedAt) > 35 && rawState != b.stable) {
-      b.stable = rawState;
-      if (b.stable == LOW) {
-        hc05.print("BUTTON|FF1|");
-        hc05.println(b.name);
-      }
-    }
-  }
 }
 
 void updateDht() {
@@ -115,9 +75,6 @@ void sendFrame() {
 }
 
 void setup() {
-  pinMode(BTN_SOS, INPUT_PULLUP);
-  pinMode(BTN_HELP, INPUT_PULLUP);
-  pinMode(BTN_GATHER, INPUT_PULLUP);
   Serial.begin(115200);
   hc05.begin(9600);
   dht.begin();
@@ -127,7 +84,6 @@ void setup() {
 
 void loop() {
   samplePulse();
-  updateButtons();
   updateDht();
   sendFrame();
 }
