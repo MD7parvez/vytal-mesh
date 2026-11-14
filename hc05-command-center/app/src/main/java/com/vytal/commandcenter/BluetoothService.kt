@@ -5,31 +5,34 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothSocket
 import android.content.Intent
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.InetAddress
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
 class BluetoothService : Service() {
     companion object {
-        const val ACTION_CONNECT = "vytal.CONNECT"
-        const val ACTION_DISCONNECT = "vytal.DISCONNECT"
-        const val ACTION_SEND = "vytal.SEND"
-        const val EXTRA_SLOT = "slot"
+        const val ACTION_CONNECT = "vytal.NODE_CONNECT"
+        const val ACTION_DISCONNECT = "vytal.NODE_DISCONNECT"
         const val EXTRA_MAC = "mac"
-        const val EXTRA_TEXT = "text"
-        const val EVENT = "com.vytal.commandcenter.EVENT"
-        const val EVENT_SLOT = "slot"
+        const val EXTRA_ROLE = "role"
+        const val EVENT = "com.vytal.commandcenter.NODE_EVENT"
         const val EVENT_STATUS = "status"
         const val EVENT_LINE = "line"
         private val SPP = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
     }
 
-    private data class Link(val slot: String, val mac: String, var socket: BluetoothSocket? = null,
-                            var reader: Thread? = null, val running: AtomicBoolean = AtomicBoolean(true))
-    private val links = mutableMapOf<String, Link>()
+    private var socket: BluetoothSocket? = null
+    private var reader: Thread? = null
+    private var running = AtomicBoolean(false)
+    private var selectedMac: String? = null
+    private var role: String = "FF1"
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -37,91 +40,110 @@ class BluetoothService : Service() {
         super.onCreate()
         val manager = getSystemService(NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= 26) manager.createNotificationChannel(
-            NotificationChannel("vytal_bt", "Vytal Bluetooth", NotificationManager.IMPORTANCE_LOW))
+            NotificationChannel("vytal_node_bt", "Vytal Node Bluetooth", NotificationManager.IMPORTANCE_LOW))
+        role = getSharedPreferences("vytal", MODE_PRIVATE).getString("role", "FF1") ?: "FF1"
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(7, notification())
-        when (intent?.action) {
-            ACTION_CONNECT -> connect(intent.getStringExtra(EXTRA_SLOT) ?: "FF1", intent.getStringExtra(EXTRA_MAC) ?: return START_STICKY)
-            ACTION_DISCONNECT -> disconnect(intent.getStringExtra(EXTRA_SLOT) ?: "FF1")
-            ACTION_SEND -> send(intent.getStringExtra(EXTRA_SLOT) ?: "FF1", intent.getStringExtra(EXTRA_TEXT) ?: "")
+        if (intent?.action == ACTION_DISCONNECT) {
+            disconnect()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        if (Build.VERSION.SDK_INT >= 26) startForeground(7, notification())
+        if (intent?.action == ACTION_CONNECT) {
+            role = intent.getStringExtra(EXTRA_ROLE) ?: role
+            selectedMac = intent.getStringExtra(EXTRA_MAC)
+            if (selectedMac != null) connect(selectedMac!!)
         }
         return START_STICKY
     }
 
     private fun notification(): Notification {
-        val b = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, "vytal_bt") else Notification.Builder(this)
-        return b.setContentTitle("Vytal Command Center")
-            .setContentText("Bluetooth monitoring service active")
+        val builder = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, "vytal_node_bt") else Notification.Builder(this)
+        return builder.setContentTitle("Vytal $role node")
+            .setContentText("Maintaining HC-05 sensor connection")
             .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
             .setOngoing(true).build()
     }
 
-    private fun emit(slot: String, status: String, line: String = "") {
-        sendBroadcast(Intent(EVENT).setPackage(packageName).putExtra(EVENT_SLOT, slot)
+    private fun emit(status: String, line: String = "") {
+        sendBroadcast(Intent(EVENT).setPackage(packageName)
             .putExtra(EVENT_STATUS, status).putExtra(EVENT_LINE, line))
     }
 
     @Suppress("MissingPermission")
-    private fun connect(slot: String, mac: String) {
-        disconnect(slot)
-        val link = Link(slot, mac)
-        links[slot] = link
-        link.reader = Thread {
+    private fun connect(mac: String) {
+        disconnect()
+        running.set(true)
+        reader = Thread {
             var delay = 1000L
-            while (link.running.get()) {
-                var socket: BluetoothSocket? = null
+            while (running.get()) {
+                var candidate: BluetoothSocket? = null
                 try {
-                    emit(slot, "CONNECTING")
-                    val adapter = BluetoothAdapter.getDefaultAdapter() ?: throw IllegalStateException("Bluetooth unavailable")
+                    emit("CONNECTING")
+                    val adapter = BluetoothAdapter.getDefaultAdapter()
+                        ?: throw IllegalStateException("Bluetooth unavailable")
                     val device: BluetoothDevice = adapter.getRemoteDevice(mac)
-                    socket = device.createRfcommSocketToServiceRecord(SPP)
-                    link.socket = socket
-                    socket.connect()
+                    candidate = device.createRfcommSocketToServiceRecord(SPP)
+                    socket = candidate
+                    candidate.connect()
                     delay = 1000L
-                    emit(slot, "CONNECTED")
-                    val input = BufferedReader(InputStreamReader(socket.inputStream))
-                    while (link.running.get()) {
+                    emit("CONNECTED")
+                    val input = BufferedReader(InputStreamReader(candidate.inputStream, Charsets.UTF_8))
+                    while (running.get()) {
                         val line = input.readLine() ?: break
-                        emit(slot, "DATA", line)
+                        emit("DATA", line)
+                        sendTelemetry(line)
                     }
-                    if (link.running.get()) emit(slot, "LINK LOST")
+                    if (running.get()) emit("LINK LOST")
                 } catch (e: Exception) {
-                    if (link.running.get()) emit(slot, "RETRY: " + (e.message ?: "connection error"))
+                    if (running.get()) emit("RETRY: ${e.message ?: "connection error"}")
                 } finally {
-                    try { socket?.close() } catch (_: Exception) {}
-                    if (link.socket === socket) link.socket = null
+                    try { candidate?.close() } catch (_: Exception) {}
+                    if (socket === candidate) socket = null
                 }
-                if (link.running.get()) {
+                if (running.get()) {
                     try { Thread.sleep(delay) } catch (_: InterruptedException) {}
                     delay = (delay * 2).coerceAtMost(15000L)
                 }
             }
-        }.apply { name = "Vytal-$slot"; start() }
+        }.apply { name = "Vytal-HC05-$role"; start() }
     }
 
-    private fun send(slot: String, text: String) {
-        val link = links[slot]
-        Thread {
-            try {
-                val s = link?.socket ?: throw IllegalStateException("Not connected")
-                synchronized(s) { s.outputStream.write((text + "\n").toByteArray(Charsets.UTF_8)); s.outputStream.flush() }
-                emit(slot, "SENT", text)
-            } catch (e: Exception) { emit(slot, "SEND ERROR", e.message ?: "write failed") }
-        }.start()
+    private fun sendTelemetry(line: String) {
+        try {
+            val wifi = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
+            @Suppress("DEPRECATION")
+            val gateway = wifi.dhcpInfo.gateway
+            if (gateway == 0) {
+                emit("BT CONNECTED • WI-FI NOT CONNECTED", line)
+                return
+            }
+            val address = InetAddress.getByAddress(byteArrayOf(
+                (gateway and 0xff).toByte(), (gateway shr 8 and 0xff).toByte(),
+                (gateway shr 16 and 0xff).toByte(), (gateway shr 24 and 0xff).toByte()
+            ))
+            val message = "VYTAL/1|$role|DATA|$line"
+            val bytes = message.toByteArray(Charsets.UTF_8)
+            DatagramSocket().use { it.send(DatagramPacket(bytes, bytes.size, address, 4210)) }
+        } catch (e: Exception) {
+            emit("WI-FI SEND ERROR: ${e.message ?: "unknown"}")
+        }
     }
 
-    private fun disconnect(slot: String) {
-        val l = links.remove(slot) ?: return
-        l.running.set(false)
-        try { l.socket?.close() } catch (_: Exception) {}
-        l.reader?.interrupt()
-        emit(slot, "DISCONNECTED")
+    private fun disconnect() {
+        running.set(false)
+        try { socket?.close() } catch (_: Exception) {}
+        socket = null
+        reader?.interrupt()
+        reader = null
+        emit("DISCONNECTED")
     }
 
     override fun onDestroy() {
-        links.keys.toList().forEach { disconnect(it) }
+        disconnect()
         super.onDestroy()
     }
 }
