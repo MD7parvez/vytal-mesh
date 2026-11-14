@@ -1,6 +1,11 @@
 name: Vytal Command Center Android Build
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'bluetooth-command-center/**'
+      - '.github/workflows/vytal-command-center.yml'
   push:
     branches: [hc05-command-center-v1]
     paths:
