@@ -1,6 +1,7 @@
 package com.vytal.commandcenter
 
 import android.Manifest
+import android.app.AlertDialog
 import android.app.Activity
 import android.bluetooth.BluetoothAdapter
 import android.content.*
