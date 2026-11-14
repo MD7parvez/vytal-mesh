@@ -53,7 +53,7 @@ class MainActivity : Activity() {
     inner class Bridge {
         @JavascriptInterface fun requestPermissions() {
             if (Build.VERSION.SDK_INT >= 31 && !hasBtPermission()) {
-                requestPermissions(arrayOf(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN), 41)
+                this@MainActivity.requestPermissions(arrayOf(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN), 41)
             } else {
                 runOnUiThread { web.evaluateJavascript("window.onPermissionResult && window.onPermissionResult(true)", null) }
             }
