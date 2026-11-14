@@ -20,6 +20,9 @@ import kotlin.concurrent.thread
 class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var lastData: TextView
+    private lateinit var heartRate: TextView
+    private lateinit var temperature: TextView
+    private lateinit var humidity: TextView
     private lateinit var log: TextView
     private lateinit var raw: TextView
     private lateinit var connectButton: Button
@@ -109,6 +112,10 @@ class MainActivity : Activity() {
         root.addView(label("LATEST SENSOR MESSAGE", 12f))
         lastData = label("Waiting for MCU data…", 17f)
         root.addView(lastData)
+        heartRate = label("Heart rate: — bpm", 15f)
+        temperature = label("Temperature: — °C", 15f)
+        humidity = label("Humidity: — %", 15f)
+        root.addView(heartRate); root.addView(temperature); root.addView(humidity)
         alertRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         listOf("SOS", "HELP", "GATHER").forEach { command ->
             alertRow.addView(button(command) { sendAlert(command) }, LinearLayout.LayoutParams(0, -2, 1f))
@@ -123,6 +130,29 @@ class MainActivity : Activity() {
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         root.addView(label("Prototype software — not certified life-safety equipment.", 10f))
         setContentView(root)
+    }
+
+    private fun renderSensorLine(line: String) {
+        val parts = line.trim().split("|")
+        if (parts.size >= 5 && parts[0] == "DATA") {
+            val sourceNode = parts[1]
+            if (sourceNode != role) {
+                log.text = "Protocol warning: received $sourceNode data while this phone is $role"
+                return
+            }
+            val bpm = parts[2].toIntOrNull()
+            val temp = parts[3].toFloatOrNull()
+            val rh = parts[4].toFloatOrNull()
+            if (bpm != null && temp != null && rh != null) {
+                heartRate.text = "Heart rate: $bpm bpm"
+                temperature.text = "Temperature: $temp °C"
+                humidity.text = "Humidity: $rh %"
+            } else {
+                log.text = "DATA frame received, but one or more values were not numeric."
+            }
+        } else if (parts.size >= 3 && (parts[0] == "BUTTON" || parts[0] == "ALERT")) {
+            log.text = "Node event: ${parts.drop(2).joinToString(" | ")}"
+        }
     }
 
     private fun applyRole() {
