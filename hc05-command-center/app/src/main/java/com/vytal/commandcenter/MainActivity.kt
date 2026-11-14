@@ -10,6 +10,7 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.wifi.WifiManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
@@ -34,6 +35,8 @@ class MainActivity : Activity() {
     private var role = "FF1"
     @Volatile private var stationRunning = false
     @Volatile private var stationSocket: DatagramSocket? = null
+    @Volatile private var nodeRunning = false
+    @Volatile private var nodeSocket: DatagramSocket? = null
     private val bg = Color.rgb(7, 13, 27)
     private val panel = Color.rgb(17, 27, 48)
     private val muted = Color.rgb(151, 168, 194)
@@ -137,6 +140,9 @@ class MainActivity : Activity() {
         disconnectButton = styledButton("DISCONNECT", Color.rgb(65, 78, 101)) { stopBluetooth() }
         sidebar.addView(connectButton, LinearLayout.LayoutParams(-1, dp(42)).apply { topMargin = dp(4) })
         sidebar.addView(disconnectButton, LinearLayout.LayoutParams(-1, dp(38)).apply { topMargin = dp(6) })
+        sidebar.addView(styledButton("GITHUB REPOSITORY", Color.rgb(55, 75, 112)) {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/MD7parvez/vytal-mesh")))
+        }, LinearLayout.LayoutParams(-1, dp(38)).apply { topMargin = dp(6) })
         sidebar.addView(View(this), LinearLayout.LayoutParams(1, 0, 1f))
         sidebar.addView(text("NETWORK  •  UDP 4210", 10f, muted, true))
         sidebar.addView(text("Prototype only — not certified life-safety equipment.", 9f, muted))
@@ -214,6 +220,7 @@ class MainActivity : Activity() {
 
     private fun applyRole() {
         stopStationReceiver()
+        stopNodeReceiver()
         val station = role == "STATION"
         connectButton.visibility = if (station) View.GONE else View.VISIBLE
         disconnectButton.visibility = if (station) View.GONE else View.VISIBLE
@@ -226,6 +233,7 @@ class MainActivity : Activity() {
             status.text = "●  $role • BLUETOOTH OFFLINE"; status.setTextColor(amber)
             log.text = "$role • Pair this phone with its own HC-05 in Android Bluetooth settings."
             lastData.text = "Waiting for $role data…"
+            startNodeReceiver()
         }
     }
 
@@ -294,11 +302,14 @@ class MainActivity : Activity() {
                     runOnUiThread {
                         raw.append(packet.address.hostAddress + ": " + message + "\n")
                         val fields = message.split("|", limit = 5)
-                        if (fields.size >= 5 && fields[0] == "VYTAL/1" && fields[2] == "DATA") {
-                            lastData.text = "Latest: " + fields[1]
-                            parseSensorLine(fields[3] + "|" + fields[4], fields[1])
-                        } else if (fields.size >= 4 && fields[0] == "VYTAL/1") {
-                            log.text = "ALERT  •  " + fields[1] + "  •  " + fields.drop(2).joinToString(" ")
+                        if (fields.size >= 4 && fields[0] == "VYTAL/1") {
+                            forwardToNodes(message)
+                            if (fields.size >= 5 && fields[2] == "DATA") {
+                                lastData.text = "Latest: " + fields[1]
+                                parseSensorLine(fields.drop(2).joinToString("|"), fields[1])
+                            } else {
+                                log.text = "RELAY  •  " + fields[1] + "  •  " + fields.drop(2).joinToString(" ")
+                            }
                         } else lastData.text = "Received packet"
                     }
                 }
@@ -308,12 +319,67 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun forwardToNodes(message: String) {
+        thread(name = "VytalMeshForward") {
+            try {
+                val wifi = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
+                @Suppress("DEPRECATION")
+                val info = wifi.dhcpInfo
+                val ip = info.ipAddress
+                val mask = if (info.netmask != 0) info.netmask else 0x00ffffff
+                val broadcast = (ip and mask.inv()) or mask
+                val address = InetAddress.getByAddress(byteArrayOf(
+                    (broadcast and 0xff).toByte(), (broadcast shr 8 and 0xff).toByte(),
+                    (broadcast shr 16 and 0xff).toByte(), (broadcast shr 24 and 0xff).toByte()))
+                val payload = message.toByteArray(Charsets.UTF_8)
+                DatagramSocket().use { socket ->
+                    socket.broadcast = true
+                    socket.send(DatagramPacket(payload, payload.size, address, 4211))
+                }
+            } catch (e: Exception) {
+                runOnUiThread { log.text = "Mesh relay error: " + (e.message ?: "send failed") }
+            }
+        }
+    }
+
+    private fun startNodeReceiver() {
+        if (nodeRunning) return
+        nodeRunning = true
+        thread(name = "VytalNodeRelayRx") {
+            try {
+                val socket = DatagramSocket(4211, InetAddress.getByName("0.0.0.0"))
+                nodeSocket = socket
+                val buffer = ByteArray(4096)
+                while (nodeRunning) {
+                    val packet = DatagramPacket(buffer, buffer.size)
+                    socket.receive(packet)
+                    val message = String(packet.data, packet.offset, packet.length, Charsets.UTF_8)
+                    if (!message.startsWith("VYTAL/1|$role|")) {
+                        runOnUiThread {
+                            raw.append("RELAY FROM " + packet.address.hostAddress + ": " + message + "\\n")
+                            log.text = "MESH RELAY  •  " + message.take(90)
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                if (nodeRunning) runOnUiThread { log.text = "Node relay: " + (e.message ?: "receiver error") }
+            } finally { nodeSocket = null }
+        }
+    }
+
+    private fun stopNodeReceiver() {
+        nodeRunning = false
+        nodeSocket?.close()
+        nodeSocket = null
+    }
+
     private fun stopStationReceiver() {
         stationRunning = false; stationSocket?.close(); stationSocket = null
     }
 
     override fun onDestroy() {
         stopStationReceiver()
+        stopNodeReceiver()
         try { unregisterReceiver(receiver) } catch (_: Exception) {}
         super.onDestroy()
     }
