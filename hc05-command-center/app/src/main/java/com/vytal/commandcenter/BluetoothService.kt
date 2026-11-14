@@ -76,10 +76,11 @@ class BluetoothService : Service() {
     @Suppress("MissingPermission")
     private fun connect(mac: String) {
         disconnect()
-        running.set(true)
+        val session = AtomicBoolean(true)
+        running = session
         reader = Thread {
             var delay = 1000L
-            while (running.get()) {
+            while (session.get()) {
                 var candidate: BluetoothSocket? = null
                 try {
                     emit("CONNECTING")
@@ -92,19 +93,19 @@ class BluetoothService : Service() {
                     delay = 1000L
                     emit("CONNECTED")
                     val input = BufferedReader(InputStreamReader(candidate.inputStream, Charsets.UTF_8))
-                    while (running.get()) {
+                    while (session.get()) {
                         val line = input.readLine() ?: break
                         emit("DATA", line)
                         sendTelemetry(line)
                     }
-                    if (running.get()) emit("LINK LOST")
+                    if (session.get()) emit("LINK LOST")
                 } catch (e: Exception) {
-                    if (running.get()) emit("RETRY: ${e.message ?: "connection error"}")
+                    if (session.get()) emit("RETRY: ${e.message ?: "connection error"}")
                 } finally {
                     try { candidate?.close() } catch (_: Exception) {}
                     if (socket === candidate) socket = null
                 }
-                if (running.get()) {
+                if (session.get()) {
                     try { Thread.sleep(delay) } catch (_: InterruptedException) {}
                     delay = (delay * 2).coerceAtMost(15000L)
                 }
