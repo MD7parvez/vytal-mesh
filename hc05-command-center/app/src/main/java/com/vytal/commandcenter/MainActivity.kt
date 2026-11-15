@@ -32,6 +32,9 @@ class MainActivity : Activity() {
     private lateinit var connectButton: Button
     private lateinit var disconnectButton: Button
     private lateinit var alertRow: LinearLayout
+    private lateinit var userFilter: Spinner
+    private var selectedStationUser = "ALL"
+    private val receivedUsers = linkedSetOf<String>()
     private var role = "FF1"
     @Volatile private var stationRunning = false
     @Volatile private var stationSocket: DatagramSocket? = null
@@ -117,23 +120,23 @@ class MainActivity : Activity() {
         sidebar.addView(View(this).apply { setBackgroundColor(Color.rgb(43, 59, 86)) },
             LinearLayout.LayoutParams(-1, dp(1)).apply { topMargin = dp(10); bottomMargin = dp(8) })
         sidebar.addView(text("DEVICE ROLE", 10f, muted, true))
-        val roles = RadioGroup(this).apply { orientation = RadioGroup.HORIZONTAL }
-        listOf("FF1", "FF2", "STATION").forEach { value ->
-            roles.addView(RadioButton(this).apply {
-                text = value; textSize = 11f; setTextColor(Color.WHITE)
-                buttonTintList = android.content.res.ColorStateList.valueOf(cyan)
-                isChecked = role == value; id = View.generateViewId(); tag = value
-            })
+        val roleOptions = (1..10).map { "FF$it" } + "STATION"
+        val roleSelector = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, roleOptions)
+            setSelection(roleOptions.indexOf(role).coerceAtLeast(0))
         }
-        roles.setOnCheckedChangeListener { group, checkedId ->
-            val selected = group.findViewById<RadioButton>(checkedId)?.tag as? String ?: "FF1"
-            if (selected != role) {
-                stopBluetooth(); role = selected
-                getSharedPreferences("vytal", MODE_PRIVATE).edit().putString("role", role).apply()
-                applyRole()
+        roleSelector.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
+                val selected = parent?.getItemAtPosition(position)?.toString() ?: "FF1"
+                if (selected != role) {
+                    stopBluetooth(); role = selected
+                    getSharedPreferences("vytal", MODE_PRIVATE).edit().putString("role", role).apply()
+                    applyRole()
+                }
             }
         }
-        sidebar.addView(roles)
+        sidebar.addView(roleSelector)
         status = text("●  Not connected", 12f, amber, true)
         status.setPadding(0, dp(8), 0, dp(8)); sidebar.addView(status)
         connectButton = styledButton("CONNECT HC-05", Color.rgb(31, 119, 142)) { chooseDevice() }
@@ -188,11 +191,25 @@ class MainActivity : Activity() {
         val diagnostics = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; background = rounded(panel); setPadding(dp(10), dp(8), dp(10), dp(8))
         }
-        diagnostics.addView(text("EVENTS  /  DIAGNOSTICS", 10f, muted, true))
+        val diagHeader = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        diagHeader.addView(text("LIVE USERS / EVENTS", 10f, muted, true), LinearLayout.LayoutParams(0, dp(34), 1f))
+        userFilter = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item,
+                listOf("ALL USERS") + (1..10).map { "FF$it" })
+        }
+        userFilter.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
+                selectedStationUser = if (position == 0) "ALL" else "FF$position"
+                if (role == "STATION") log.text = "Filter: $selectedStationUser"
+            }
+        }
+        diagHeader.addView(userFilter, LinearLayout.LayoutParams(dp(125), dp(40)))
+        diagnostics.addView(diagHeader)
         log = text("Choose a role to begin.", 11f, Color.WHITE); diagnostics.addView(log)
-        raw = text("", 9f, green)
-        val scroll = ScrollView(this); scroll.addView(raw)
-        diagnostics.addView(scroll, LinearLayout.LayoutParams(-1, dp(64)))
+        raw = text("", 11f, green).apply { setPadding(dp(5), dp(5), dp(5), dp(5)) }
+        val scroll = ScrollView(this).apply { isFillViewport = true; addView(raw) }
+        diagnostics.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         lower.addView(diagnostics, LinearLayout.LayoutParams(0, -1, 1f))
         content.addView(lower, LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = dp(10) })
         root.addView(sidebar); root.addView(content); setContentView(root)
@@ -228,9 +245,10 @@ class MainActivity : Activity() {
         connectButton.visibility = if (station) View.GONE else View.VISIBLE
         disconnectButton.visibility = if (station) View.GONE else View.VISIBLE
         alertRow.visibility = if (station) View.GONE else View.VISIBLE
+        userFilter.visibility = if (station) View.VISIBLE else View.GONE
         if (station) {
             status.text = "●  STATION • STARTING"; status.setTextColor(cyan)
-            log.text = "Listening for FF1 and FF2 over the hotspot."
+            log.text = "Listening for up to 10 firefighter IDs over the hotspot."
             lastData.text = "Command station receiver"; startStationReceiver()
         } else {
             status.text = "●  $role • BLUETOOTH OFFLINE"; status.setTextColor(amber)
@@ -303,17 +321,27 @@ class MainActivity : Activity() {
                     val packet = DatagramPacket(buffer, buffer.size); socket.receive(packet)
                     val message = String(packet.data, packet.offset, packet.length, Charsets.UTF_8)
                     runOnUiThread {
-                        raw.append(packet.address.hostAddress + ": " + message + "\n")
-                        val fields = message.split("|", limit = 5)
-                        if (fields.size >= 4 && fields[0] == "VYTAL/1") {
-                            forwardToNodes(message)
-                            if (fields.size >= 5 && fields[2] == "DATA") {
-                                lastData.text = "Latest: " + fields[1]
-                                parseSensorLine(fields.drop(2).joinToString("|"), fields[1])
-                            } else {
-                                log.text = "RELAY  •  " + fields[1] + "  •  " + fields.drop(2).joinToString(" ")
+                        val fields = message.split("|")
+                        if (fields.size >= 3 && fields[0] == "VYTAL/1") {
+                            val userId = fields[1]
+                            if (userId.matches(Regex("FF([1-9]|10)"))) receivedUsers.add(userId)
+                            status.text = "●  STATION • ${receivedUsers.size}/10 USERS"; status.setTextColor(green)
+                            val matchesFilter = selectedStationUser == "ALL" || selectedStationUser == userId
+                            if (matchesFilter) {
+                                raw.append("${packet.address.hostAddress}  [$userId]  $message\n")
+                                if (raw.length() > 14000) raw.text = raw.text.takeLast(9000)
+                                if (fields[2] == "DATA") {
+                                    lastData.text = "Latest: $userId"
+                                    parseSensorLine(fields.drop(3).joinToString("|"), userId)
+                                    log.text = "$userId • live telemetry received"
+                                } else log.text = "$userId • " + fields.drop(2).joinToString(" ")
                             }
-                        } else lastData.text = "Received packet"
+                            forwardToNodes(message)
+                        } else {
+                            raw.append("${packet.address.hostAddress}  $message\n")
+                            lastData.text = "Received packet"
+                        }
+                    }
                     }
                 }
             } catch (e: Exception) {
