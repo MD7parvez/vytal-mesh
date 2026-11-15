@@ -345,7 +345,6 @@ class MainActivity : Activity() {
                             lastData.text = "Received packet"
                         }
                     }
-                    }
                 }
             } catch (e: Exception) {
                 if (stationRunning) runOnUiThread { log.text = "Station receiver: " + (e.message ?: "error") }
