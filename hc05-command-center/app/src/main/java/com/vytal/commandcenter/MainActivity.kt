@@ -332,7 +332,10 @@ class MainActivity : Activity() {
                                 if (raw.length() > 14000) raw.text = raw.text.takeLast(9000)
                                 if (fields[2] == "DATA") {
                                     lastData.text = "Latest: $userId"
-                                    parseSensorLine(fields.drop(3).joinToString("|"), userId)
+                                    val sensorLine = if (fields.size >= 8 && fields[3] == "DATA") {
+                                        "DATA|$userId|" + fields.drop(5).joinToString("|")
+                                    } else fields.drop(3).joinToString("|")
+                                    parseSensorLine(sensorLine, userId)
                                     log.text = "$userId • live telemetry received"
                                 } else log.text = "$userId • " + fields.drop(2).joinToString(" ")
                             }
