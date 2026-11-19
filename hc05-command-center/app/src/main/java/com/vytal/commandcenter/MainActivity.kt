@@ -1,0 +1,607 @@
+package com.vytal.commandcenter
+
+import android.Manifest
+import android.app.Activity
+import android.app.AlertDialog
+import android.bluetooth.BluetoothAdapter
+import android.content.*
+import android.content.pm.PackageManager
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.net.wifi.WifiManager
+import android.net.Uri
+import android.location.Location
+import android.location.LocationManager
+import android.media.AudioManager
+import android.media.ToneGenerator
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.view.Gravity
+import android.view.View
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.widget.*
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.InetAddress
+import kotlin.concurrent.thread
+
+class MainActivity : Activity() {
+    private lateinit var status: TextView
+    private lateinit var heartRate: TextView
+    private lateinit var temperature: TextView
+    private lateinit var humidity: TextView
+    private lateinit var lastData: TextView
+    private lateinit var log: TextView
+    private lateinit var raw: TextView
+    private lateinit var connectButton: Button
+    private lateinit var disconnectButton: Button
+    private lateinit var alertRow: LinearLayout
+    private lateinit var userFilter: Spinner
+    private var selectedStationUser = "ALL"
+    private val receivedUsers = linkedSetOf<String>()
+    private var role = "FF1"
+    private var alarmTone: ToneGenerator? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var lastValidPulseAt = 0L
+    private var pulseWasValid = false
+    private val pulseStaleCheck = object : Runnable {
+        override fun run() {
+            if (role != "STATION" && pulseWasValid && System.currentTimeMillis() - lastValidPulseAt > 6000L) {
+                heartRate.text = "NO SIGNAL"
+                log.text = "PULSE SENSOR • no valid beat for 6 seconds • check sensor contact"
+                pulseWasValid = false
+            }
+            mainHandler.postDelayed(this, 1000L)
+        }
+    }
+    private val userLocations = linkedMapOf<String, String>()
+    private var locationMapWebView: WebView? = null
+    private var mapPageReady = false
+    private var locationManager: LocationManager? = null
+    private var locationUpdatesActive = false
+    private val locationListener = object : android.location.LocationListener {
+        override fun onLocationChanged(location: Location) {
+            if (role != "STATION") {
+                sendToStation("VYTAL/1|" + role + "|GPS|" + location.latitude + "|" + location.longitude)
+                runOnUiThread { log.text = "GPS LIVE • " + role + " • " + "%.5f".format(location.latitude) + ", " + "%.5f".format(location.longitude) }
+            }
+        }
+    }
+    private val userStats = linkedMapOf<String, String>()
+    private val demoUsers = (6..10).associate { "FF" + it to ((70 + it).toString() + " BPM • 24." + it + "°C • " + (45 + it) + "% RH • DEMO") }
+    @Volatile private var stationRunning = false
+    @Volatile private var stationSocket: DatagramSocket? = null
+    @Volatile private var nodeRunning = false
+    @Volatile private var nodeSocket: DatagramSocket? = null
+    private val bg = Color.rgb(7, 13, 27)
+    private val panel = Color.rgb(17, 27, 48)
+    private val muted = Color.rgb(151, 168, 194)
+    private val cyan = Color.rgb(48, 205, 220)
+    private val green = Color.rgb(64, 210, 145)
+    private val amber = Color.rgb(255, 184, 77)
+
+    private val receiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val state = intent?.getStringExtra(BluetoothService.EVENT_STATUS) ?: return
+            val line = intent.getStringExtra(BluetoothService.EVENT_LINE) ?: ""
+            status.text = "$role  •  $state"
+            status.setTextColor(if (state.contains("CONNECTED")) green else amber)
+            if (line.isNotBlank()) {
+                lastData.text = line
+                parseSensorLine(line, role)
+                raw.append("$line\n")
+                log.text = "Live sensor stream from $role"
+            }
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        window.statusBarColor = bg
+        window.navigationBarColor = bg
+        role = getSharedPreferences("vytal", MODE_PRIVATE).getString("role", "FF1") ?: "FF1"
+        buildUi()
+        val filter = IntentFilter(BluetoothService.EVENT)
+        if (Build.VERSION.SDK_INT >= 33) registerReceiver(receiver, filter, RECEIVER_NOT_EXPORTED)
+        else registerReceiver(receiver, filter)
+        ensurePermissions()
+        applyRole()
+        mainHandler.post(pulseStaleCheck)
+    }
+
+    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+    private fun rounded(color: Int, radius: Int = 18) =
+        GradientDrawable().apply { setColor(color); cornerRadius = dp(radius).toFloat() }
+
+    private fun text(value: String, size: Float, color: Int = Color.WHITE, bold: Boolean = false) =
+        TextView(this).apply {
+            text = value; textSize = size; setTextColor(color)
+            if (bold) setTypeface(typeface, Typeface.BOLD)
+            gravity = Gravity.CENTER_VERTICAL
+        }
+
+    private fun styledButton(value: String, color: Int, action: () -> Unit) =
+        Button(this).apply {
+            text = value; textSize = 12f; isAllCaps = false; setTextColor(Color.WHITE)
+            background = rounded(color, 12); setPadding(dp(8), 0, dp(8), 0)
+            setOnClickListener { action() }
+        }
+
+    private fun metricCard(caption: String, accent: Int): Pair<LinearLayout, TextView> {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; background = rounded(panel)
+            setPadding(dp(14), dp(9), dp(14), dp(9))
+        }
+        card.addView(text(caption.uppercase(), 10f, muted, true))
+        val value = text("—", 27f, accent, true)
+        card.addView(value)
+        return Pair(card, value)
+    }
+
+    private fun buildUi() {
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(12), dp(10), dp(12), dp(10)); setBackgroundColor(bg)
+        }
+        val sidebar = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; background = rounded(panel, 20)
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+        }
+        sidebar.layoutParams = LinearLayout.LayoutParams(dp(230), -1).apply { marginEnd = dp(12) }
+        sidebar.addView(text("VYTAL", 25f, cyan, true))
+        sidebar.addView(text("FIREFIGHTER SYSTEM", 10f, muted, true))
+        sidebar.addView(View(this).apply { setBackgroundColor(Color.rgb(43, 59, 86)) },
+            LinearLayout.LayoutParams(-1, dp(1)).apply { topMargin = dp(10); bottomMargin = dp(8) })
+        sidebar.addView(text("DEVICE ROLE", 10f, muted, true))
+        val roleOptions = (1..10).map { "FF$it" } + "STATION"
+        val roleSelector = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, roleOptions)
+            setSelection(roleOptions.indexOf(role).coerceAtLeast(0))
+        }
+        roleSelector.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
+                val selected = parent?.getItemAtPosition(position)?.toString() ?: "FF1"
+                if (selected != role) {
+                    stopBluetooth(); role = selected
+                    getSharedPreferences("vytal", MODE_PRIVATE).edit().putString("role", role).apply()
+                    applyRole()
+                }
+            }
+        }
+        sidebar.addView(roleSelector)
+        status = text("●  Not connected", 12f, amber, true)
+        status.setPadding(0, dp(8), 0, dp(8)); sidebar.addView(status)
+        connectButton = styledButton("CONNECT HC-05", Color.rgb(31, 119, 142)) { chooseDevice() }
+        disconnectButton = styledButton("DISCONNECT", Color.rgb(65, 78, 101)) { stopBluetooth() }
+        sidebar.addView(connectButton, LinearLayout.LayoutParams(-1, dp(42)).apply { topMargin = dp(4) })
+        sidebar.addView(disconnectButton, LinearLayout.LayoutParams(-1, dp(38)).apply { topMargin = dp(6) })
+        sidebar.addView(styledButton("TEST MODE", Color.rgb(145, 75, 38)) { showTestMode() }, LinearLayout.LayoutParams(-1, dp(38)).apply { topMargin = dp(5) })
+        sidebar.addView(styledButton("FF6–FF10 DEMO DATA", Color.rgb(73, 91, 135)) { showDemoUsers() }, LinearLayout.LayoutParams(-1, dp(38)).apply { topMargin = dp(5) })
+        sidebar.addView(styledButton("SILENCE ALARM", Color.rgb(125, 48, 57)) { silenceAlarm() }, LinearLayout.LayoutParams(-1, dp(38)).apply { topMargin = dp(5) })
+        sidebar.addView(styledButton("GPS / USER LOCATIONS", Color.rgb(42, 105, 112)) { showGps() }, LinearLayout.LayoutParams(-1, dp(38)).apply { topMargin = dp(5) })
+        sidebar.addView(styledButton("GITHUB  ↗", Color.rgb(54, 75, 112)) {
+            startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://github.com/MD7parvez/vytal-mesh")))
+        }, LinearLayout.LayoutParams(-1, dp(38)).apply { topMargin = dp(6) })
+        sidebar.addView(styledButton("GITHUB REPOSITORY", Color.rgb(55, 75, 112)) {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/MD7parvez/vytal-mesh")))
+        }, LinearLayout.LayoutParams(-1, dp(38)).apply { topMargin = dp(6) })
+        sidebar.addView(View(this), LinearLayout.LayoutParams(1, 0, 1f))
+        sidebar.addView(text("NETWORK  •  UDP 4210", 10f, muted, true))
+        sidebar.addView(text("Prototype only — not certified life-safety equipment.", 9f, muted))
+
+        val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(2), 0, 0, 0) }
+        content.layoutParams = LinearLayout.LayoutParams(0, -1, 1f)
+        val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        val headerTitle = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        headerTitle.addView(text("LIVE VITALS", 20f, Color.WHITE, true))
+        headerTitle.addView(text("Bluetooth sensor link  /  Wi-Fi command-station uplink", 10f, muted))
+        header.addView(headerTitle, LinearLayout.LayoutParams(0, -2, 1f))
+        lastData = text("Waiting for $role data…", 10f, muted)
+        header.addView(lastData)
+        content.addView(header, LinearLayout.LayoutParams(-1, dp(48)))
+
+        val metrics = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val hr = metricCard("Heart rate  •  BPM", green); heartRate = hr.second
+        val temp = metricCard("Temperature  •  °C", amber); temperature = temp.second
+        val humid = metricCard("Humidity  •  %", cyan); humidity = humid.second
+        listOf(hr.first, temp.first, humid.first).forEachIndexed { i, card ->
+            metrics.addView(card, LinearLayout.LayoutParams(0, dp(88), 1f).apply { if (i > 0) marginStart = dp(9) })
+        }
+        content.addView(metrics)
+
+        val lower = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        val actions = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; background = rounded(panel); setPadding(dp(10), dp(8), dp(10), dp(8))
+        }
+        actions.addView(text("FIREFIGHTER ALERTS", 10f, muted, true))
+        alertRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        alertRow.addView(styledButton("SOS", Color.rgb(176, 45, 61)) { sendAlert("SOS") },
+            LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginEnd = dp(5); topMargin = dp(5) })
+        alertRow.addView(styledButton("HELP", Color.rgb(169, 105, 35)) { sendAlert("HELP") },
+            LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginEnd = dp(5); topMargin = dp(5) })
+        alertRow.addView(styledButton("GATHER", Color.rgb(45, 91, 166)) { sendAlert("GATHER") },
+            LinearLayout.LayoutParams(0, dp(42), 1f).apply { topMargin = dp(5) })
+        actions.addView(alertRow)
+        lower.addView(actions, LinearLayout.LayoutParams(0, -2, 1.05f).apply { marginEnd = dp(9) })
+
+        val diagnostics = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; background = rounded(panel); setPadding(dp(10), dp(8), dp(10), dp(8))
+        }
+        val diagHeader = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        diagHeader.addView(text("LIVE USERS / EVENTS", 10f, muted, true), LinearLayout.LayoutParams(0, dp(34), 1f))
+        userFilter = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item,
+                listOf("ALL USERS") + (1..10).map { "FF$it" })
+        }
+        userFilter.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
+                selectedStationUser = if (position == 0) "ALL" else "FF$position"
+                if (role == "STATION") {
+                    val detail = userStats[selectedStationUser] ?: demoUsers[selectedStationUser]
+                    log.text = if (selectedStationUser == "ALL") "Showing all firefighter telemetry." else selectedStationUser + " • " + (detail ?: "No telemetry received yet.")
+                }
+            }
+        }
+        diagHeader.addView(userFilter, LinearLayout.LayoutParams(dp(125), dp(40)))
+        diagnostics.addView(diagHeader)
+        log = text("Choose a role to begin.", 11f, Color.WHITE); diagnostics.addView(log)
+        raw = text("", 11f, green).apply { setPadding(dp(5), dp(5), dp(5), dp(5)) }
+        val scroll = ScrollView(this).apply { isFillViewport = true; addView(raw) }
+        diagnostics.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        lower.addView(diagnostics, LinearLayout.LayoutParams(0, -1, 1f))
+        content.addView(lower, LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = dp(10) })
+        root.addView(sidebar); root.addView(content); setContentView(root)
+    }
+
+    private fun ensurePermissions() {
+        if (Build.VERSION.SDK_INT >= 31 && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED)
+            requestPermissions(arrayOf(Manifest.permission.BLUETOOTH_CONNECT), 41)
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 42)
+    }
+
+    private fun parseSensorLine(line: String, expectedRole: String) {
+        val p = line.trim().split("|")
+        if (p.size >= 5 && p[0] == "DATA") {
+            if (p[1] != expectedRole) return
+            val bpm = p[2].toIntOrNull()
+            val temp = p[3].toFloatOrNull()
+            val rh = p[4].toFloatOrNull()
+            val validPulse = bpm != null && bpm in 35..220
+            if (validPulse) {
+                heartRate.text = bpm.toString()
+                lastValidPulseAt = System.currentTimeMillis()
+                pulseWasValid = true
+            } else {
+                heartRate.text = "NO SIGNAL"
+                pulseWasValid = false
+            }
+            temperature.text = if (temp != null && temp in -20f..100f) "%.1f".format(temp) else "—"
+            humidity.text = if (rh != null && rh in 0f..100f) "%.0f".format(rh) else "—"
+            userStats[expectedRole] = "HR " + (if (validPulse) bpm.toString() else "NO SIGNAL") + " • " + (temp?.toString() ?: "—") + "°C • " + (rh?.toString() ?: "—") + "% RH"
+            val alerts = mutableListOf<String>()
+            if (bpm != null && bpm > 130) alerts.add("HIGH HEART RATE")
+            if (bpm != null && bpm in 1..45) alerts.add("LOW HEART RATE")
+            if (temp != null && temp > 40f) alerts.add("HIGH AMBIENT TEMPERATURE")
+            if (temp != null && temp < 5f) alerts.add("LOW AMBIENT TEMPERATURE")
+            if (rh != null && rh > 85f) alerts.add("HIGH HUMIDITY")
+            if (rh != null && rh < 20f) alerts.add("LOW HUMIDITY")
+            if (alerts.isNotEmpty()) {
+                log.text = "AUTO ALERT: " + alerts.joinToString(", ")
+                startAlarm()
+                sendToStation("VYTAL/1|" + expectedRole + "|AUTOALERT|" + alerts.joinToString(";"))
+            } else log.text = "$expectedRole • sensor frame received"
+        } else if (p.size >= 3 && p[0] == "BUTTON") {
+            log.text = "ALERT  •  " + p[1] + "  •  " + p[2]
+        }
+    }
+
+    private fun startAlarm() {
+        try {
+            if (alarmTone == null) alarmTone = ToneGenerator(AudioManager.STREAM_ALARM, 100)
+            alarmTone?.startTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, 15000)
+        } catch (_: Exception) { log.text = "ALERT ACTIVE • audio unavailable" }
+    }
+
+    private fun silenceAlarm() {
+        try { alarmTone?.stopTone(); alarmTone?.release() } catch (_: Exception) {}
+        alarmTone = null
+        log.text = "Alarm silenced."
+    }
+
+    private fun showTestMode() {
+        val choices = arrayOf("High heart rate • 160 BPM", "Low heart rate • 35 BPM", "High temperature • 45°C", "Low temperature • 2°C", "High humidity • 95%", "Low humidity • 10%", "Silence alarm")
+        AlertDialog.Builder(this).setTitle("TEST MODE • SIMULATED VALUES").setItems(choices) { _, which ->
+            when (which) {
+                0 -> { heartRate.text = "160"; log.text = "TEST ALERT: HIGH HEART RATE"; startAlarm() }
+                1 -> { heartRate.text = "35"; log.text = "TEST ALERT: LOW HEART RATE"; startAlarm() }
+                2 -> { temperature.text = "45.0"; log.text = "TEST ALERT: HIGH AMBIENT TEMPERATURE"; startAlarm() }
+                3 -> { temperature.text = "2.0"; log.text = "TEST ALERT: LOW AMBIENT TEMPERATURE"; startAlarm() }
+                4 -> { humidity.text = "95"; log.text = "TEST ALERT: HIGH HUMIDITY"; startAlarm() }
+                5 -> { humidity.text = "10"; log.text = "TEST ALERT: LOW HUMIDITY"; startAlarm() }
+                else -> silenceAlarm()
+            }
+        }.setNegativeButton("Close", null).show()
+    }
+
+    private fun showDemoUsers() {
+        val rows = demoUsers.entries.joinToString("\n") { it.key + " • " + it.value }
+        AlertDialog.Builder(this).setTitle("FF6–FF10 • SYNTHETIC DEMO DATA").setMessage(rows).setPositiveButton("OK", null).show()
+    }
+
+    @Suppress("MissingPermission")
+    private fun showGps() {
+        if (role == "STATION") {
+            showLocationMap()
+            return
+        }
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION), 77)
+            log.text = "Allow location permission, then tap GPS / USER LOCATIONS again."
+            return
+        }
+        try {
+            val manager = getSystemService(LOCATION_SERVICE) as LocationManager
+            val loc: Location? = manager.getLastKnownLocation(LocationManager.GPS_PROVIDER) ?: manager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
+            if (loc == null) { log.text = "No location fix. Enable Location and retry."; return }
+            val lat = loc.latitude.toString()
+            val lon = loc.longitude.toString()
+            sendToStation("VYTAL/1|" + role + "|GPS|" + lat + "|" + lon)
+            startContinuousLocationSharing(manager)
+            log.text = "GPS LIVE SHARING STARTED • " + role + " • " + lat + ", " + lon
+        } catch (e: Exception) { log.text = "GPS unavailable: " + (e.message ?: "error") }
+    }
+
+    @Suppress("MissingPermission")
+    private fun startContinuousLocationSharing(manager: LocationManager) {
+        if (locationUpdatesActive) return
+        try {
+            locationManager = manager
+            if (manager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                manager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 5000L, 3f, locationListener, Looper.getMainLooper())
+                locationUpdatesActive = true
+            }
+            if (manager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+                manager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 5000L, 3f, locationListener, Looper.getMainLooper())
+                locationUpdatesActive = true
+            }
+            if (!locationUpdatesActive) log.text = "Enable Location services, then retry."
+        } catch (e: Exception) { log.text = "GPS tracking unavailable: " + (e.message ?: "error") }
+    }
+
+    private fun stopContinuousLocationSharing() {
+        try { locationManager?.removeUpdates(locationListener) } catch (_: Exception) {}
+        locationUpdatesActive = false
+        locationManager = null
+    }
+
+    private fun showLocationMap() {
+        val web = WebView(this)
+        web.settings.javaScriptEnabled = true
+        web.settings.domStorageEnabled = true
+        web.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                mapPageReady = true
+                refreshLocationMap()
+            }
+        }
+        locationMapWebView = web
+        mapPageReady = false
+        val dialog = AlertDialog.Builder(this).setTitle("VYTAL • LIVE FIREFIGHTER MAP").setView(web).setPositiveButton("Close", null).create()
+        dialog.setOnDismissListener { locationMapWebView = null; mapPageReady = false; web.destroy() }
+        dialog.show()
+        dialog.window?.setLayout((resources.displayMetrics.widthPixels * 0.9f).toInt(), (resources.displayMetrics.heightPixels * 0.82f).toInt())
+        web.loadDataWithBaseURL("https://unpkg.com/", buildLocationMapHtml(), "text/html", "UTF-8", null)
+    }
+
+    private fun locationMarkersJs(): String {
+        return userLocations.entries.mapNotNull { entry ->
+            val parts = entry.value.split(",")
+            val lat = parts.getOrNull(0)?.trim()?.toDoubleOrNull()
+            val lon = parts.getOrNull(1)?.trim()?.toDoubleOrNull()
+            if (lat != null && lon != null && lat >= -90.0 && lat <= 90.0 && lon >= -180.0 && lon <= 180.0) "{id:'" + entry.key + "',lat:" + lat + ",lon:" + lon + "}" else null
+        }.joinToString(",")
+    }
+
+    private fun buildLocationMapHtml(): String {
+        return "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>" +
+            "<link rel='stylesheet' href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css'>" +
+            "<script src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'></script>" +
+            "<style>html,body,#map{height:100%;margin:0;background:#07101e}</style></head><body><div id='map'></div><script>" +
+            "var map=L.map('map').setView([23.8,90.3],12);L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19}).addTo(map);var pins={};" +
+            "function update(data){data.forEach(function(p){if(!pins[p.id])pins[p.id]=L.marker([p.lat,p.lon]).addTo(map).bindPopup(p.id);else pins[p.id].setLatLng([p.lat,p.lon]);});" +
+            "var a=Object.values(pins);if(a.length===1)map.setView(a[0].getLatLng(),16);else if(a.length>1)map.fitBounds(L.featureGroup(a).getBounds().pad(0.2));}</script></body></html>"
+    }
+
+    private fun refreshLocationMap() {
+        if (mapPageReady) locationMapWebView?.evaluateJavascript("update([" + locationMarkersJs() + "]);", null)
+    }
+    private fun applyRole() {
+        stopStationReceiver()
+        stopNodeReceiver()
+        val station = role == "STATION"
+        connectButton.visibility = if (station) View.GONE else View.VISIBLE
+        disconnectButton.visibility = if (station) View.GONE else View.VISIBLE
+        alertRow.visibility = if (station) View.GONE else View.VISIBLE
+        userFilter.visibility = if (station) View.VISIBLE else View.GONE
+        if (station) {
+            status.text = "●  STATION • STARTING"; status.setTextColor(cyan)
+            log.text = "Listening for up to 10 firefighter IDs over the hotspot."
+            lastData.text = "Command station receiver"; startStationReceiver()
+        } else {
+            status.text = "●  $role • BLUETOOTH OFFLINE"; status.setTextColor(amber)
+            log.text = "$role • Pair this phone with its own HC-05 in Android Bluetooth settings."
+            lastData.text = "Waiting for $role data…"
+            startNodeReceiver()
+        }
+    }
+
+    @Suppress("MissingPermission")
+    private fun chooseDevice() {
+        if (Build.VERSION.SDK_INT >= 31 && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+            ensurePermissions(); log.text = "Allow Nearby devices permission, then tap CONNECT HC-05 again."; return
+        }
+        val adapter = BluetoothAdapter.getDefaultAdapter()
+        if (adapter == null || !adapter.isEnabled) { log.text = "Enable Bluetooth and pair this phone with its HC-05 first."; return }
+        val devices = adapter.bondedDevices.toList()
+        if (devices.isEmpty()) { log.text = "No paired devices. Pair the HC-05 in Android Bluetooth settings first."; return }
+        val labels = devices.map { "${it.name ?: "Bluetooth device"} • ${it.address}" }.toTypedArray()
+        AlertDialog.Builder(this).setTitle("Select this node's HC-05").setItems(labels) { _, which ->
+            val device = devices[which]
+            val intent = Intent(this, BluetoothService::class.java).setAction(BluetoothService.ACTION_CONNECT)
+                .putExtra(BluetoothService.EXTRA_MAC, device.address).putExtra(BluetoothService.EXTRA_ROLE, role)
+            if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
+            status.text = "●  $role • CONNECTING"; status.setTextColor(amber)
+            log.text = "Persistent Bluetooth SPP connection requested."
+        }.setNegativeButton("Cancel", null).show()
+    }
+
+    private fun stopBluetooth() {
+        startService(Intent(this, BluetoothService::class.java).setAction(BluetoothService.ACTION_DISCONNECT))
+    }
+
+    private fun sendAlert(command: String) {
+        sendToStation("VYTAL/1|$role|ALERT|$command")
+        log.text = "$command sent to command station, if reachable."
+    }
+
+    private fun sendToStation(message: String) {
+        thread(name = "VytalUdpSend") {
+            try {
+                val wifi = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
+                @Suppress("DEPRECATION")
+                val gateway = wifi.dhcpInfo.gateway
+                if (gateway == 0) throw IllegalStateException("Not connected to command-station hotspot")
+                val address = InetAddress.getByAddress(byteArrayOf(
+                    (gateway and 0xff).toByte(), (gateway shr 8 and 0xff).toByte(),
+                    (gateway shr 16 and 0xff).toByte(), (gateway shr 24 and 0xff).toByte()))
+                val bytes = message.toByteArray(Charsets.UTF_8)
+                DatagramSocket().use { socket ->
+                    socket.broadcast = true
+                    socket.send(DatagramPacket(bytes, bytes.size, address, 4210))
+                }
+            } catch (e: Exception) {
+                runOnUiThread { log.text = "Wi-Fi uplink: " + (e.message ?: "send failed") }
+            }
+        }
+    }
+
+    private fun startStationReceiver() {
+        if (stationRunning) return
+        stationRunning = true
+        thread(name = "VytalStationUdp") {
+            try {
+                val socket = DatagramSocket(4210, InetAddress.getByName("0.0.0.0"))
+                stationSocket = socket
+                val buffer = ByteArray(4096)
+                runOnUiThread { status.text = "●  STATION • LISTENING"; status.setTextColor(green) }
+                while (stationRunning) {
+                    val packet = DatagramPacket(buffer, buffer.size); socket.receive(packet)
+                    val message = String(packet.data, packet.offset, packet.length, Charsets.UTF_8)
+                    runOnUiThread {
+                        val fields = message.split("|")
+                        if (fields.size >= 3 && fields[0] == "VYTAL/1") {
+                            val userId = fields[1]
+                            if (userId.matches(Regex("FF([1-9]|10)"))) receivedUsers.add(userId)
+                            if (fields[2] == "GPS" && fields.size >= 5) { val lat = fields[3].toDoubleOrNull(); val lon = fields[4].toDoubleOrNull(); if (lat != null && lon != null && lat >= -90.0 && lat <= 90.0 && lon >= -180.0 && lon <= 180.0) { userLocations[userId] = lat.toString() + ", " + lon.toString(); refreshLocationMap() } }
+                            status.text = "●  STATION • ${receivedUsers.size}/10 USERS"; status.setTextColor(green)
+                            val matchesFilter = selectedStationUser == "ALL" || selectedStationUser == userId
+                            if (matchesFilter) {
+                                raw.append("${packet.address.hostAddress}  [$userId]  $message\n")
+                                if (raw.length() > 14000) raw.text = raw.text.takeLast(9000)
+                                if (fields[2] == "DATA") {
+                                    lastData.text = "Latest: $userId"
+                                    val sensorLine = if (fields.size >= 8 && fields[3] == "DATA") {
+                                        "DATA|$userId|" + fields.drop(5).joinToString("|")
+                                    } else fields.drop(3).joinToString("|")
+                                    parseSensorLine(sensorLine, userId)
+                                    log.text = "$userId • live telemetry received"
+                                } else log.text = "$userId • " + fields.drop(2).joinToString(" ")
+                            }
+                            forwardToNodes(message)
+                        } else {
+                            raw.append("${packet.address.hostAddress}  $message\n")
+                            lastData.text = "Received packet"
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                if (stationRunning) runOnUiThread { log.text = "Station receiver: " + (e.message ?: "error") }
+            } finally { stationSocket = null }
+        }
+    }
+
+    private fun forwardToNodes(message: String) {
+        thread(name = "VytalMeshForward") {
+            try {
+                val wifi = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
+                @Suppress("DEPRECATION")
+                val info = wifi.dhcpInfo
+                val ip = info.ipAddress
+                val mask = if (info.netmask != 0) info.netmask else 0x00ffffff
+                val broadcast = (ip and mask.inv()) or mask
+                val address = InetAddress.getByAddress(byteArrayOf(
+                    (broadcast and 0xff).toByte(), (broadcast shr 8 and 0xff).toByte(),
+                    (broadcast shr 16 and 0xff).toByte(), (broadcast shr 24 and 0xff).toByte()))
+                val payload = message.toByteArray(Charsets.UTF_8)
+                DatagramSocket().use { socket ->
+                    socket.broadcast = true
+                    socket.send(DatagramPacket(payload, payload.size, address, 4211))
+                }
+            } catch (e: Exception) {
+                runOnUiThread { log.text = "Mesh relay error: " + (e.message ?: "send failed") }
+            }
+        }
+    }
+
+    private fun startNodeReceiver() {
+        if (nodeRunning) return
+        nodeRunning = true
+        thread(name = "VytalNodeRelayRx") {
+            try {
+                val socket = DatagramSocket(4211, InetAddress.getByName("0.0.0.0"))
+                nodeSocket = socket
+                val buffer = ByteArray(4096)
+                while (nodeRunning) {
+                    val packet = DatagramPacket(buffer, buffer.size)
+                    socket.receive(packet)
+                    val message = String(packet.data, packet.offset, packet.length, Charsets.UTF_8)
+                    if (!message.startsWith("VYTAL/1|$role|")) {
+                        runOnUiThread {
+                            raw.append("RELAY FROM " + packet.address.hostAddress + ": " + message + "\\n")
+                            log.text = "MESH RELAY  •  " + message.take(90)
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                if (nodeRunning) runOnUiThread { log.text = "Node relay: " + (e.message ?: "receiver error") }
+            } finally { nodeSocket = null }
+        }
+    }
+
+    private fun stopNodeReceiver() {
+        nodeRunning = false
+        nodeSocket?.close()
+        nodeSocket = null
+    }
+
+    private fun stopStationReceiver() {
+        stationRunning = false; stationSocket?.close(); stationSocket = null
+    }
+
+    override fun onDestroy() {
+        stopStationReceiver()
+        stopNodeReceiver()
+        stopContinuousLocationSharing()
+        mainHandler.removeCallbacks(pulseStaleCheck)
+        try { unregisterReceiver(receiver) } catch (_: Exception) {}
+        super.onDestroy()
+    }
+}
