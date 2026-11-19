@@ -17,6 +17,8 @@ import android.media.AudioManager
 import android.media.ToneGenerator
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.Gravity
 import android.view.View
 import android.widget.*
@@ -41,6 +43,19 @@ class MainActivity : Activity() {
     private val receivedUsers = linkedSetOf<String>()
     private var role = "FF1"
     private var alarmTone: ToneGenerator? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var lastValidPulseAt = 0L
+    private var pulseWasValid = false
+    private val pulseStaleCheck = object : Runnable {
+        override fun run() {
+            if (role != "STATION" && pulseWasValid && System.currentTimeMillis() - lastValidPulseAt > 6000L) {
+                heartRate.text = "NO SIGNAL"
+                log.text = "PULSE SENSOR • no valid beat for 6 seconds • check sensor contact"
+                pulseWasValid = false
+            }
+            mainHandler.postDelayed(this, 1000L)
+        }
+    }
     private val userLocations = linkedMapOf<String, String>()
     private val userStats = linkedMapOf<String, String>()
     private val demoUsers = (6..10).associate { "FF" + it to ((70 + it).toString() + " BPM • 24." + it + "°C • " + (45 + it) + "% RH • DEMO") }
@@ -82,6 +97,7 @@ class MainActivity : Activity() {
         else registerReceiver(receiver, filter)
         ensurePermissions()
         applyRole()
+        mainHandler.post(pulseStaleCheck)
     }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
@@ -244,10 +260,18 @@ class MainActivity : Activity() {
             val bpm = p[2].toIntOrNull()
             val temp = p[3].toFloatOrNull()
             val rh = p[4].toFloatOrNull()
-            userStats[expectedRole] = "HR " + (bpm?.toString() ?: "—") + " BPM • " + (temp?.toString() ?: "—") + "°C • " + (rh?.toString() ?: "—") + "% RH"
-            heartRate.text = if (bpm != null && bpm in 1..240) "$bpm" else "—"
+            val validPulse = bpm != null && bpm in 35..220
+            if (validPulse) {
+                heartRate.text = bpm.toString()
+                lastValidPulseAt = System.currentTimeMillis()
+                pulseWasValid = true
+            } else {
+                heartRate.text = "NO SIGNAL"
+                pulseWasValid = false
+            }
             temperature.text = if (temp != null && temp in -20f..100f) "%.1f".format(temp) else "—"
             humidity.text = if (rh != null && rh in 0f..100f) "%.0f".format(rh) else "—"
+            userStats[expectedRole] = "HR " + (if (validPulse) bpm.toString() else "NO SIGNAL") + " • " + (temp?.toString() ?: "—") + "°C • " + (rh?.toString() ?: "—") + "% RH"
             val alerts = mutableListOf<String>()
             if (bpm != null && bpm > 130) alerts.add("HIGH HEART RATE")
             if (bpm != null && bpm in 1..45) alerts.add("LOW HEART RATE")
@@ -498,6 +522,7 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         stopStationReceiver()
         stopNodeReceiver()
+        mainHandler.removeCallbacks(pulseStaleCheck)
         try { unregisterReceiver(receiver) } catch (_: Exception) {}
         super.onDestroy()
     }
