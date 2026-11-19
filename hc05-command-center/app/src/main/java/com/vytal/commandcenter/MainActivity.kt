@@ -42,6 +42,7 @@ class MainActivity : Activity() {
     private var role = "FF1"
     private var alarmTone: ToneGenerator? = null
     private val userLocations = linkedMapOf<String, String>()
+    private val userStats = linkedMapOf<String, String>()
     private val demoUsers = (6..10).associate { "FF" + it to ((70 + it).toString() + " BPM • 24." + it + "°C • " + (45 + it) + "% RH • DEMO") }
     @Volatile private var stationRunning = false
     @Volatile private var stationSocket: DatagramSocket? = null
@@ -212,7 +213,10 @@ class MainActivity : Activity() {
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
             override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
                 selectedStationUser = if (position == 0) "ALL" else "FF$position"
-                if (role == "STATION") log.text = "Filter: $selectedStationUser"
+                if (role == "STATION") {
+                    val detail = userStats[selectedStationUser] ?: demoUsers[selectedStationUser]
+                    log.text = if (selectedStationUser == "ALL") "Showing all firefighter telemetry." else selectedStationUser + " • " + (detail ?: "No telemetry received yet.")
+                }
             }
         }
         diagHeader.addView(userFilter, LinearLayout.LayoutParams(dp(125), dp(40)))
@@ -240,6 +244,7 @@ class MainActivity : Activity() {
             val bpm = p[2].toIntOrNull()
             val temp = p[3].toFloatOrNull()
             val rh = p[4].toFloatOrNull()
+            userStats[expectedRole] = "HR " + (bpm?.toString() ?: "—") + " BPM • " + (temp?.toString() ?: "—") + "°C • " + (rh?.toString() ?: "—") + "% RH"
             heartRate.text = if (bpm != null && bpm in 1..240) "$bpm" else "—"
             temperature.text = if (temp != null && temp in -20f..100f) "%.1f".format(temp) else "—"
             humidity.text = if (rh != null && rh in 0f..100f) "%.0f".format(rh) else "—"
