@@ -21,6 +21,8 @@ import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
 import android.view.View
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.*
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -57,6 +59,18 @@ class MainActivity : Activity() {
         }
     }
     private val userLocations = linkedMapOf<String, String>()
+    private var locationMapWebView: WebView? = null
+    private var mapPageReady = false
+    private var locationManager: LocationManager? = null
+    private var locationUpdatesActive = false
+    private val locationListener = object : android.location.LocationListener {
+        override fun onLocationChanged(location: Location) {
+            if (role != "STATION") {
+                sendToStation("VYTAL/1|" + role + "|GPS|" + location.latitude + "|" + location.longitude)
+                runOnUiThread { log.text = "GPS LIVE • " + role + " • " + "%.5f".format(location.latitude) + ", " + "%.5f".format(location.longitude) }
+            }
+        }
+    }
     private val userStats = linkedMapOf<String, String>()
     private val demoUsers = (6..10).associate { "FF" + it to ((70 + it).toString() + " BPM • 24." + it + "°C • " + (45 + it) + "% RH • DEMO") }
     @Volatile private var stationRunning = false
@@ -325,8 +339,7 @@ class MainActivity : Activity() {
     @Suppress("MissingPermission")
     private fun showGps() {
         if (role == "STATION") {
-            val rows = userLocations.entries.joinToString("\n") { it.key + ": " + it.value }
-            AlertDialog.Builder(this).setTitle("LIVE USER LOCATIONS").setMessage(if (rows.isBlank()) "No live GPS reports received. Each firefighter phone must share its GPS." else rows).setPositiveButton("OK", null).show()
+            showLocationMap()
             return
         }
         if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
@@ -341,11 +354,75 @@ class MainActivity : Activity() {
             val lat = loc.latitude.toString()
             val lon = loc.longitude.toString()
             sendToStation("VYTAL/1|" + role + "|GPS|" + lat + "|" + lon)
-            log.text = "GPS shared for " + role + ": " + lat + ", " + lon
-            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("geo:" + lat + "," + lon + "?q=" + lat + "," + lon)))
+            startContinuousLocationSharing(manager)
+            log.text = "GPS LIVE SHARING STARTED • " + role + " • " + lat + ", " + lon
         } catch (e: Exception) { log.text = "GPS unavailable: " + (e.message ?: "error") }
     }
 
+    @Suppress("MissingPermission")
+    private fun startContinuousLocationSharing(manager: LocationManager) {
+        if (locationUpdatesActive) return
+        try {
+            locationManager = manager
+            if (manager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                manager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 5000L, 3f, locationListener, Looper.getMainLooper())
+                locationUpdatesActive = true
+            }
+            if (manager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+                manager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 5000L, 3f, locationListener, Looper.getMainLooper())
+                locationUpdatesActive = true
+            }
+            if (!locationUpdatesActive) log.text = "Enable Location services, then retry."
+        } catch (e: Exception) { log.text = "GPS tracking unavailable: " + (e.message ?: "error") }
+    }
+
+    private fun stopContinuousLocationSharing() {
+        try { locationManager?.removeUpdates(locationListener) } catch (_: Exception) {}
+        locationUpdatesActive = false
+        locationManager = null
+    }
+
+    private fun showLocationMap() {
+        val web = WebView(this)
+        web.settings.javaScriptEnabled = true
+        web.settings.domStorageEnabled = true
+        web.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                mapPageReady = true
+                refreshLocationMap()
+            }
+        }
+        locationMapWebView = web
+        mapPageReady = false
+        val dialog = AlertDialog.Builder(this).setTitle("VYTAL • LIVE FIREFIGHTER MAP").setView(web).setPositiveButton("Close", null).create()
+        dialog.setOnDismissListener { locationMapWebView = null; mapPageReady = false; web.destroy() }
+        dialog.show()
+        dialog.window?.setLayout((resources.displayMetrics.widthPixels * 0.9f).toInt(), (resources.displayMetrics.heightPixels * 0.82f).toInt())
+        web.loadDataWithBaseURL("https://unpkg.com/", buildLocationMapHtml(), "text/html", "UTF-8", null)
+    }
+
+    private fun locationMarkersJs(): String {
+        return userLocations.entries.mapNotNull { entry ->
+            val parts = entry.value.split(",")
+            val lat = parts.getOrNull(0)?.trim()?.toDoubleOrNull()
+            val lon = parts.getOrNull(1)?.trim()?.toDoubleOrNull()
+            if (lat != null && lon != null && lat >= -90.0 && lat <= 90.0 && lon >= -180.0 && lon <= 180.0) "{id:'" + entry.key + "',lat:" + lat + ",lon:" + lon + "}" else null
+        }.joinToString(",")
+    }
+
+    private fun buildLocationMapHtml(): String {
+        return "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>" +
+            "<link rel='stylesheet' href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css'>" +
+            "<script src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'></script>" +
+            "<style>html,body,#map{height:100%;margin:0;background:#07101e}</style></head><body><div id='map'></div><script>" +
+            "var map=L.map('map').setView([23.8,90.3],12);L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19}).addTo(map);var pins={};" +
+            "function update(data){data.forEach(function(p){if(!pins[p.id])pins[p.id]=L.marker([p.lat,p.lon]).addTo(map).bindPopup(p.id);else pins[p.id].setLatLng([p.lat,p.lon]);});" +
+            "var a=Object.values(pins);if(a.length===1)map.setView(a[0].getLatLng(),16);else if(a.length>1)map.fitBounds(L.featureGroup(a).getBounds().pad(0.2));}</script></body></html>"
+    }
+
+    private fun refreshLocationMap() {
+        if (mapPageReady) locationMapWebView?.evaluateJavascript("update([" + locationMarkersJs() + "]);", null)
+    }
     private fun applyRole() {
         stopStationReceiver()
         stopNodeReceiver()
@@ -433,7 +510,7 @@ class MainActivity : Activity() {
                         if (fields.size >= 3 && fields[0] == "VYTAL/1") {
                             val userId = fields[1]
                             if (userId.matches(Regex("FF([1-9]|10)"))) receivedUsers.add(userId)
-                            if (fields[2] == "GPS" && fields.size >= 5) userLocations[userId] = fields[3] + ", " + fields[4]
+                            if (fields[2] == "GPS" && fields.size >= 5) { val lat = fields[3].toDoubleOrNull(); val lon = fields[4].toDoubleOrNull(); if (lat != null && lon != null && lat >= -90.0 && lat <= 90.0 && lon >= -180.0 && lon <= 180.0) { userLocations[userId] = lat.toString() + ", " + lon.toString(); refreshLocationMap() } }
                             status.text = "●  STATION • ${receivedUsers.size}/10 USERS"; status.setTextColor(green)
                             val matchesFilter = selectedStationUser == "ALL" || selectedStationUser == userId
                             if (matchesFilter) {
@@ -522,6 +599,7 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         stopStationReceiver()
         stopNodeReceiver()
+        stopContinuousLocationSharing()
         mainHandler.removeCallbacks(pulseStaleCheck)
         try { unregisterReceiver(receiver) } catch (_: Exception) {}
         super.onDestroy()
