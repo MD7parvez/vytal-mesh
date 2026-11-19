@@ -281,7 +281,15 @@ class MainActivity : Activity() {
     private fun showTestMode() {
         val choices = arrayOf("High heart rate • 160 BPM", "Low heart rate • 35 BPM", "High temperature • 45°C", "Low temperature • 2°C", "High humidity • 95%", "Low humidity • 10%", "Silence alarm")
         AlertDialog.Builder(this).setTitle("TEST MODE • SIMULATED VALUES").setItems(choices) { _, which ->
-            if (which == 6) { silenceAlarm() } else { log.text = "TEST ALERT: " + choices[which]; startAlarm() }
+            when (which) {
+                0 -> { heartRate.text = "160"; log.text = "TEST ALERT: HIGH HEART RATE"; startAlarm() }
+                1 -> { heartRate.text = "35"; log.text = "TEST ALERT: LOW HEART RATE"; startAlarm() }
+                2 -> { temperature.text = "45.0"; log.text = "TEST ALERT: HIGH AMBIENT TEMPERATURE"; startAlarm() }
+                3 -> { temperature.text = "2.0"; log.text = "TEST ALERT: LOW AMBIENT TEMPERATURE"; startAlarm() }
+                4 -> { humidity.text = "95"; log.text = "TEST ALERT: HIGH HUMIDITY"; startAlarm() }
+                5 -> { humidity.text = "10"; log.text = "TEST ALERT: LOW HUMIDITY"; startAlarm() }
+                else -> silenceAlarm()
+            }
         }.setNegativeButton("Close", null).show()
     }
 
