@@ -11,6 +11,10 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.wifi.WifiManager
 import android.net.Uri
+import android.location.Location
+import android.location.LocationManager
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
@@ -36,6 +40,9 @@ class MainActivity : Activity() {
     private var selectedStationUser = "ALL"
     private val receivedUsers = linkedSetOf<String>()
     private var role = "FF1"
+    private var alarmTone: ToneGenerator? = null
+    private val userLocations = linkedMapOf<String, String>()
+    private val demoUsers = (6..10).associate { "FF" + it to ((70 + it).toString() + " BPM • 24." + it + "°C • " + (45 + it) + "% RH • DEMO") }
     @Volatile private var stationRunning = false
     @Volatile private var stationSocket: DatagramSocket? = null
     @Volatile private var nodeRunning = false
@@ -143,6 +150,10 @@ class MainActivity : Activity() {
         disconnectButton = styledButton("DISCONNECT", Color.rgb(65, 78, 101)) { stopBluetooth() }
         sidebar.addView(connectButton, LinearLayout.LayoutParams(-1, dp(42)).apply { topMargin = dp(4) })
         sidebar.addView(disconnectButton, LinearLayout.LayoutParams(-1, dp(38)).apply { topMargin = dp(6) })
+        sidebar.addView(styledButton("TEST MODE", Color.rgb(145, 75, 38)) { showTestMode() }, LinearLayout.LayoutParams(-1, dp(38)).apply { topMargin = dp(5) })
+        sidebar.addView(styledButton("FF6–FF10 DEMO DATA", Color.rgb(73, 91, 135)) { showDemoUsers() }, LinearLayout.LayoutParams(-1, dp(38)).apply { topMargin = dp(5) })
+        sidebar.addView(styledButton("SILENCE ALARM", Color.rgb(125, 48, 57)) { silenceAlarm() }, LinearLayout.LayoutParams(-1, dp(38)).apply { topMargin = dp(5) })
+        sidebar.addView(styledButton("GPS / USER LOCATIONS", Color.rgb(42, 105, 112)) { showGps() }, LinearLayout.LayoutParams(-1, dp(38)).apply { topMargin = dp(5) })
         sidebar.addView(styledButton("GITHUB  ↗", Color.rgb(54, 75, 112)) {
             startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://github.com/MD7parvez/vytal-mesh")))
         }, LinearLayout.LayoutParams(-1, dp(38)).apply { topMargin = dp(6) })
@@ -232,10 +243,70 @@ class MainActivity : Activity() {
             heartRate.text = if (bpm != null && bpm in 1..240) "$bpm" else "—"
             temperature.text = if (temp != null && temp in -20f..100f) "%.1f".format(temp) else "—"
             humidity.text = if (rh != null && rh in 0f..100f) "%.0f".format(rh) else "—"
-            log.text = "$expectedRole • sensor frame received"
+            val alerts = mutableListOf<String>()
+            if (bpm != null && bpm > 130) alerts.add("HIGH HEART RATE")
+            if (bpm != null && bpm in 1..45) alerts.add("LOW HEART RATE")
+            if (temp != null && temp > 40f) alerts.add("HIGH AMBIENT TEMPERATURE")
+            if (temp != null && temp < 5f) alerts.add("LOW AMBIENT TEMPERATURE")
+            if (rh != null && rh > 85f) alerts.add("HIGH HUMIDITY")
+            if (rh != null && rh < 20f) alerts.add("LOW HUMIDITY")
+            if (alerts.isNotEmpty()) {
+                log.text = "AUTO ALERT: " + alerts.joinToString(", ")
+                startAlarm()
+                sendToStation("VYTAL/1|" + expectedRole + "|AUTOALERT|" + alerts.joinToString(";"))
+            } else log.text = "$expectedRole • sensor frame received"
         } else if (p.size >= 3 && p[0] == "BUTTON") {
             log.text = "ALERT  •  " + p[1] + "  •  " + p[2]
         }
+    }
+
+    private fun startAlarm() {
+        try {
+            if (alarmTone == null) alarmTone = ToneGenerator(AudioManager.STREAM_ALARM, 100)
+            alarmTone?.startTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, 15000)
+        } catch (_: Exception) { log.text = "ALERT ACTIVE • audio unavailable" }
+    }
+
+    private fun silenceAlarm() {
+        try { alarmTone?.stopTone(); alarmTone?.release() } catch (_: Exception) {}
+        alarmTone = null
+        log.text = "Alarm silenced."
+    }
+
+    private fun showTestMode() {
+        val choices = arrayOf("High heart rate • 160 BPM", "Low heart rate • 35 BPM", "High temperature • 45°C", "Low temperature • 2°C", "High humidity • 95%", "Low humidity • 10%", "Silence alarm")
+        AlertDialog.Builder(this).setTitle("TEST MODE • SIMULATED VALUES").setItems(choices) { _, which ->
+            if (which == 6) { silenceAlarm() } else { log.text = "TEST ALERT: " + choices[which]; startAlarm() }
+        }.setNegativeButton("Close", null).show()
+    }
+
+    private fun showDemoUsers() {
+        val rows = demoUsers.entries.joinToString("\n") { it.key + " • " + it.value }
+        AlertDialog.Builder(this).setTitle("FF6–FF10 • SYNTHETIC DEMO DATA").setMessage(rows).setPositiveButton("OK", null).show()
+    }
+
+    @Suppress("MissingPermission")
+    private fun showGps() {
+        if (role == "STATION") {
+            val rows = userLocations.entries.joinToString("\n") { it.key + ": " + it.value }
+            AlertDialog.Builder(this).setTitle("LIVE USER LOCATIONS").setMessage(if (rows.isBlank()) "No live GPS reports received. Each firefighter phone must share its GPS." else rows).setPositiveButton("OK", null).show()
+            return
+        }
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION), 77)
+            log.text = "Allow location permission, then tap GPS / USER LOCATIONS again."
+            return
+        }
+        try {
+            val manager = getSystemService(LOCATION_SERVICE) as LocationManager
+            val loc: Location? = manager.getLastKnownLocation(LocationManager.GPS_PROVIDER) ?: manager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
+            if (loc == null) { log.text = "No location fix. Enable Location and retry."; return }
+            val lat = loc.latitude.toString()
+            val lon = loc.longitude.toString()
+            sendToStation("VYTAL/1|" + role + "|GPS|" + lat + "|" + lon)
+            log.text = "GPS shared for " + role + ": " + lat + ", " + lon
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("geo:" + lat + "," + lon + "?q=" + lat + "," + lon)))
+        } catch (e: Exception) { log.text = "GPS unavailable: " + (e.message ?: "error") }
     }
 
     private fun applyRole() {
@@ -325,6 +396,7 @@ class MainActivity : Activity() {
                         if (fields.size >= 3 && fields[0] == "VYTAL/1") {
                             val userId = fields[1]
                             if (userId.matches(Regex("FF([1-9]|10)"))) receivedUsers.add(userId)
+                            if (fields[2] == "GPS" && fields.size >= 5) userLocations[userId] = fields[3] + ", " + fields[4]
                             status.text = "●  STATION • ${receivedUsers.size}/10 USERS"; status.setTextColor(green)
                             val matchesFilter = selectedStationUser == "ALL" || selectedStationUser == userId
                             if (matchesFilter) {
